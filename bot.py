@@ -7,15 +7,13 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMedia
 API_TOKEN = '8622655341:AAHToV_spEtWShH-yV2XNw6M50TzEq2BUOA'
 bot = telebot.TeleBot(API_TOKEN)
 
-# دالة الأزرار (استخدام رموز قصيرة لتجنب خطأ تليجرام)
+# دالة الأزرار
 def get_quality_markup(url):
     markup = InlineKeyboardMarkup()
-    # الصف الأول: جودات عالية
     markup.row(
         InlineKeyboardButton("🎬 1080p", callback_data=f"10|{url}"),
         InlineKeyboardButton("🎬 720p", callback_data=f"72|{url}")
     )
-    # الصف الثاني: جودة متوسطة وصوت
     markup.row(
         InlineKeyboardButton("🎬 480p", callback_data=f"48|{url}"),
         InlineKeyboardButton("🎵 MP3 (صوت)", callback_data=f"aud|{url}")
@@ -25,9 +23,8 @@ def get_quality_markup(url):
 @bot.message_handler(func=lambda m: True)
 def handle_links(message):
     url = message.text
-    # التأكد من أن الرابط يوتيوب أو تيك توك
-    if any(x in url for x in ["tiktok.com", "youtu.be", "youtube.com"]):
-        bot.reply_to(message, "⚙️ اختر الجودة المطلوبة (سحب سريع):", reply_markup=get_quality_markup(url))
+    if any(x in url for x in ["tiktok.com", "youtube.com", "youtu.be"]):
+        bot.reply_to(message, "⚙️ اختر الجودة (يدعم الفيديوهات الطويلة 1h+):", reply_markup=get_quality_markup(url))
 
 @bot.callback_query_handler(func=lambda call: True)
 def process_download(call):
@@ -35,7 +32,6 @@ def process_download(call):
     q_code = data_parts[0]
     url = data_parts[1]
     
-    # خريطة الجودات للمحرك الأول
     quality_map = {
         '10': 'bestvideo[height<=1080]+bestaudio/best',
         '72': 'bestvideo[height<=720]+bestaudio/best',
@@ -43,10 +39,10 @@ def process_download(call):
         'aud': 'bestaudio/best'
     }
     
-    bot.edit_message_text("🚀 جاري سحب الرابط المباشر بالجودة المختارة...", call.message.chat.id, call.message.message_id)
+    bot.edit_message_text("🚀 جاري فحص الرابط ومعالجة الفيديو الطويل...", call.message.chat.id, call.message.message_id)
     
     try:
-        # 1. قسم تيك توك (صور وفيديو سريع)
+        # 1. قسم تيك توك
         if "tiktok.com" in url:
             res = requests.get(f"https://www.tikwm.com/api/?url={url}").json()
             t_data = res['data']
@@ -59,27 +55,37 @@ def process_download(call):
             bot.delete_message(call.message.chat.id, call.message.message_id)
             return
 
-        # 2. قسم يوتيوب (محرك السحب المباشر السريع)
+        # 2. قسم يوتيوب المطور للفيديوهات الطويلة
         ydl_opts = {
             'format': quality_map.get(q_code, 'best'),
             'quiet': True,
-            'no_warnings': True
+            'no_warnings': True,
+            'source_address': '0.0.0.0',
+            'socket_timeout': 600, # زيادة وقت الانتظار لـ 10 دقائق للفيديوهات الطويلة
+            'retries': 10,
+            'extract_flat': False,
         }
+        
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             direct_url = info['url']
-            
+            title = info.get('title', 'Video')
+            duration = info.get('duration', 0)
+
+            # لو الفيديو طويل نبعت رسالة تنبيه
+            if duration > 3600:
+                bot.send_message(call.message.chat.id, f"⏳ فيديو طويل اكتشفناه ({duration // 3600} ساعة).. جاري السحب.")
+
             if q_code == "aud":
-                bot.send_audio(call.message.chat.id, direct_url, caption="✅ تم سحب الصوت")
+                bot.send_audio(call.message.chat.id, direct_url, caption=f"✅ {title}\n🎵 تم سحب الصوت بنجاح")
             else:
-                bot.send_video(call.message.chat.id, direct_url, caption=f"✅ جودة {info.get('height', q_code)}p جاهزة")
+                bot.send_video(call.message.chat.id, direct_url, caption=f"✅ {title}\n🎬 فيديو طويل جاهز")
         
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
-    except Exception:
-        bot.edit_message_text("❌ عذراً، هذه الجودة غير متاحة لهذا الفيديو أو الرابط محمي.", call.message.chat.id, call.message.message_id)
+    except Exception as e:
+        bot.edit_message_text(f"❌ عذراً، الرابط محمي أو الفيديو حجمه ضخم جداً على السيرفر المجاني.", call.message.chat.id, call.message.message_id)
 
 bot.remove_webhook()
-print("📡 البوت شغال الآن بأزرار الجودات وأقصى سرعة...")
 bot.infinity_polling(skip_pending=True)
-  
+        
