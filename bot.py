@@ -2,6 +2,7 @@ import telebot
 import requests
 import os
 import uuid
+import time
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 
 API_TOKEN = os.environ.get('BOT_TOKEN')
@@ -35,38 +36,47 @@ def get_markup(url):
         )
     else:
         markup.row(
-            InlineKeyboardButton("🎬 فيديو", callback_data=f"vid|{key}"),
+            InlineKeyboardButton("🎬 720p", callback_data=f"vid|{key}"),
             InlineKeyboardButton("🎵 صوت MP3", callback_data=f"aud|{key}")
         )
     return markup
 
-def get_cobalt(url, audio_only=False):
-    headers = {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-    }
-    body = {
-        'url': url,
-        'downloadMode': 'audio' if audio_only else 'auto',
-        'audioFormat': 'mp3',
-        'filenameStyle': 'basic',
-    }
-    res = requests.post(
-        'https://api.cobalt.tools/',
-        json=body,
+def get_loader(url, audio_only=False):
+    session = requests.Session()
+    headers = {'User-Agent': 'Mozilla/5.0'}
+
+    # الخطوة 1: نبعت الرابط
+    res = session.post(
+        'https://loader.to/ajax/download.php',
+        data={
+            'url': url,
+            'format': 'mp3' if audio_only else 'mp4',
+        },
         headers=headers,
         timeout=30
     ).json()
 
-    status = res.get('status')
+    token = res.get('id')
+    if not token:
+        raise Exception("فشل الحصول على token")
 
-    if status == 'stream' or status == 'redirect':
-        return res.get('url'), 'فيديو'
+    # الخطوة 2: ننتظر جهوز الرابط
+    for _ in range(20):
+        time.sleep(3)
+        check = session.get(
+            f'https://loader.to/ajax/progress.php?id={token}',
+            headers=headers,
+            timeout=15
+        ).json()
 
-    if status == 'picker':
-        return res['picker'][0]['url'], 'فيديو'
+        if check.get('success') == 1:
+            download_url = check.get('download_url')
+            if download_url:
+                return download_url
+        if check.get('success') == -1:
+            raise Exception("فشل التحميل من loader")
 
-    raise Exception(f"cobalt error: {res}")
+    raise Exception("انتهى الوقت")
 
 @bot.message_handler(commands=['start'])
 def welcome(message):
@@ -132,10 +142,10 @@ def handle_download(call):
             return
 
         # ==================== يوتيوب / فيسبوك / انستغرام ====================
-        bot.edit_message_text("⬇️ جاري التحميل...", call.message.chat.id, call.message.message_id)
+        bot.edit_message_text("⏳ جاري التجهيز (ممكن يأخد دقيقة)...", call.message.chat.id, call.message.message_id)
 
         audio_only = q_code == "aud"
-        link, title = get_cobalt(url, audio_only)
+        link = get_loader(url, audio_only)
 
         bot.edit_message_text("📤 جاري الرفع...", call.message.chat.id, call.message.message_id)
 
@@ -147,15 +157,8 @@ def handle_download(call):
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
     except Exception as e:
-        err = str(e)
-        if "private" in err.lower():
-            msg = "❌ الفيديو خاص ومش متاح."
-        elif "age" in err.lower():
-            msg = "❌ الفيديو محمي بسبب السن."
-        else:
-            msg = "❌ فشل التحميل، جرب رابط تاني."
         try:
-            bot.edit_message_text(msg, call.message.chat.id, call.message.message_id)
+            bot.edit_message_text("❌ فشل التحميل، جرب رابط تاني.", call.message.chat.id, call.message.message_id)
         except:
             pass
 
