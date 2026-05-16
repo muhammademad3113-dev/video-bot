@@ -1,9 +1,7 @@
 import telebot
 import requests
-import yt_dlp
 import os
 import uuid
-import glob
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 
 API_TOKEN = os.environ.get('BOT_TOKEN')
@@ -37,14 +35,38 @@ def get_markup(url):
         )
     else:
         markup.row(
-            InlineKeyboardButton("🎬 1080p", callback_data=f"10|{key}"),
-            InlineKeyboardButton("🎬 720p",  callback_data=f"72|{key}")
-        )
-        markup.row(
-            InlineKeyboardButton("🎬 480p",      callback_data=f"48|{key}"),
+            InlineKeyboardButton("🎬 فيديو", callback_data=f"vid|{key}"),
             InlineKeyboardButton("🎵 صوت MP3", callback_data=f"aud|{key}")
         )
     return markup
+
+def get_cobalt(url, audio_only=False):
+    headers = {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+    }
+    body = {
+        'url': url,
+        'downloadMode': 'audio' if audio_only else 'auto',
+        'audioFormat': 'mp3',
+        'filenameStyle': 'basic',
+    }
+    res = requests.post(
+        'https://api.cobalt.tools/',
+        json=body,
+        headers=headers,
+        timeout=30
+    ).json()
+
+    status = res.get('status')
+
+    if status == 'stream' or status == 'redirect':
+        return res.get('url'), 'فيديو'
+
+    if status == 'picker':
+        return res['picker'][0]['url'], 'فيديو'
+
+    raise Exception(f"cobalt error: {res}")
 
 @bot.message_handler(commands=['start'])
 def welcome(message):
@@ -65,38 +87,6 @@ def handle_msg(message):
     else:
         bot.reply_to(message, "❌ ابعت رابط صحيح من تيك توك أو يوتيوب أو فيسبوك أو انستغرام.")
 
-def download_with_ytdlp(url, q_code):
-    quality_map = {
-        '10':  'bestvideo[height<=1080][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        '72':  'bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        '48':  'bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'vid': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
-        'aud': 'bestaudio/best'
-    }
-    filename = f"/tmp/{uuid.uuid4()}"
-    ydl_opts = {
-        'format': quality_map.get(q_code, 'best'),
-        'outtmpl': filename + '.%(ext)s',
-        'quiet': True,
-        'no_warnings': True,
-        'merge_output_format': 'mp4',
-        'extractor_args': {'youtube': {'player_client': ['android']}},
-        'http_headers': {'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12) gzip'},
-    }
-    if q_code == "aud":
-        ydl_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }]
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        title = info.get('title', 'فيديو')
-    files = glob.glob(filename + '.*')
-    if not files:
-        raise Exception("الملف مش موجود بعد التحميل")
-    return files[0], title
-
 @bot.callback_query_handler(func=lambda call: True)
 def handle_download(call):
     parts = call.data.split('|', 1)
@@ -110,6 +100,7 @@ def handle_download(call):
     bot.edit_message_text("🔍 جاري الفحص...", call.message.chat.id, call.message.message_id)
 
     try:
+        # ==================== تيك توك ====================
         if is_tiktok(url):
             res = requests.get(
                 f"https://www.tikwm.com/api/?url={url}",
@@ -140,46 +131,29 @@ def handle_download(call):
             bot.delete_message(call.message.chat.id, call.message.message_id)
             return
 
+        # ==================== يوتيوب / فيسبوك / انستغرام ====================
         bot.edit_message_text("⬇️ جاري التحميل...", call.message.chat.id, call.message.message_id)
 
-        filepath, title = download_with_ytdlp(url, q_code)
-        file_size = os.path.getsize(filepath)
+        audio_only = q_code == "aud"
+        link, title = get_cobalt(url, audio_only)
 
-        if file_size > 50 * 1024 * 1024 and q_code not in ['aud', '48']:
-            os.remove(filepath)
-            bot.edit_message_text("⬇️ الحجم كبير، بحاول جودة أقل...", call.message.chat.id, call.message.message_id)
-            filepath, title = download_with_ytdlp(url, '48')
-            file_size = os.path.getsize(filepath)
+        bot.edit_message_text("📤 جاري الرفع...", call.message.chat.id, call.message.message_id)
 
-        if file_size > 50 * 1024 * 1024:
-            os.remove(filepath)
-            bot.edit_message_text(
-                "❌ الفيديو أكبر من 50MB.\nجرب: 🎵 صوت MP3 بدل الفيديو.",
-                call.message.chat.id, call.message.message_id
-            )
-            return
+        if audio_only:
+            bot.send_audio(call.message.chat.id, link, caption="🎵 الصوت")
+        else:
+            bot.send_video(call.message.chat.id, link, caption="🎬 الفيديو", supports_streaming=True)
 
-        bot.edit_message_text("📤 جاري الرفع على تيليجرام...", call.message.chat.id, call.message.message_id)
-
-        with open(filepath, 'rb') as f:
-            if q_code == "aud":
-                bot.send_audio(call.message.chat.id, f, caption=f"🎵 {title}")
-            else:
-                bot.send_video(call.message.chat.id, f, caption=f"🎬 {title}", supports_streaming=True)
-
-        os.remove(filepath)
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
     except Exception as e:
         err = str(e)
-        if "Sign in" in err or "age" in err.lower():
-            msg = "❌ الفيديو محمي أو يحتاج تسجيل دخول."
-        elif "private" in err.lower():
+        if "private" in err.lower():
             msg = "❌ الفيديو خاص ومش متاح."
-        elif "blocked" in err.lower() or "429" in err:
-            msg = "❌ السيرفر محجوب مؤقتاً. جرب جودة أقل."
+        elif "age" in err.lower():
+            msg = "❌ الفيديو محمي بسبب السن."
         else:
-            msg = "❌ فشل التحميل، جرب مرة تانية."
+            msg = "❌ فشل التحميل، جرب رابط تاني."
         try:
             bot.edit_message_text(msg, call.message.chat.id, call.message.message_id)
         except:
