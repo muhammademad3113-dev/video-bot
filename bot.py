@@ -2,13 +2,21 @@ import telebot
 import requests
 import os
 import uuid
-import time
+import re
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, InputMediaPhoto
 
 API_TOKEN = os.environ.get('BOT_TOKEN')
 bot = telebot.TeleBot(API_TOKEN)
 
 url_store = {}
+
+# قائمة سيرفرات Invidious المجانية
+INVIDIOUS_SERVERS = [
+    "https://invidious.snopyta.org",
+    "https://yewtu.be",
+    "https://invidious.kavin.rocks",
+    "https://vid.puffyan.us",
+]
 
 def store_url(url):
     key = str(uuid.uuid4())[:8]
@@ -26,6 +34,56 @@ def is_supported(url):
         "instagram.com"
     ])
 
+def extract_video_id(url):
+    patterns = [
+        r'youtu\.be/([^?&]+)',
+        r'youtube\.com/watch\?v=([^?&]+)',
+        r'youtube\.com/shorts/([^?&]+)',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def get_youtube_link(url, audio_only=False):
+    video_id = extract_video_id(url)
+    if not video_id:
+        raise Exception("مش قادر أجيب ID الفيديو")
+
+    for server in INVIDIOUS_SERVERS:
+        try:
+            res = requests.get(
+                f"{server}/api/v1/videos/{video_id}",
+                timeout=15
+            ).json()
+
+            if 'adaptiveFormats' not in res and 'formatStreams' not in res:
+                continue
+
+            if audio_only:
+                # نجيب أحسن صوت
+                audio_formats = [
+                    f for f in res.get('adaptiveFormats', [])
+                    if f.get('type', '').startswith('audio/mp4')
+                ]
+                if audio_formats:
+                    best = max(audio_formats, key=lambda x: x.get('bitrate', 0))
+                    return best['url'], res.get('title', 'صوت')
+            else:
+                # نجيب فيديو 720p أو أقل
+                video_formats = [
+                    f for f in res.get('formatStreams', [])
+                    if 'mp4' in f.get('type', '') and f.get('qualityLabel') in ['720p', '480p', '360p']
+                ]
+                if video_formats:
+                    return video_formats[0]['url'], res.get('title', 'فيديو')
+
+        except Exception:
+            continue
+
+    raise Exception("كل السيرفرات فشلت")
+
 def get_markup(url):
     key = store_url(url)
     markup = InlineKeyboardMarkup()
@@ -36,47 +94,10 @@ def get_markup(url):
         )
     else:
         markup.row(
-            InlineKeyboardButton("🎬 720p", callback_data=f"vid|{key}"),
-            InlineKeyboardButton("🎵 صوت MP3", callback_data=f"aud|{key}")
+            InlineKeyboardButton("🎬 فيديو", callback_data=f"vid|{key}"),
+            InlineKeyboardButton("🎵 صوت", callback_data=f"aud|{key}")
         )
     return markup
-
-def get_loader(url, audio_only=False):
-    session = requests.Session()
-    headers = {'User-Agent': 'Mozilla/5.0'}
-
-    # الخطوة 1: نبعت الرابط
-    res = session.post(
-        'https://loader.to/ajax/download.php',
-        data={
-            'url': url,
-            'format': 'mp3' if audio_only else 'mp4',
-        },
-        headers=headers,
-        timeout=30
-    ).json()
-
-    token = res.get('id')
-    if not token:
-        raise Exception("فشل الحصول على token")
-
-    # الخطوة 2: ننتظر جهوز الرابط
-    for _ in range(20):
-        time.sleep(3)
-        check = session.get(
-            f'https://loader.to/ajax/progress.php?id={token}',
-            headers=headers,
-            timeout=15
-        ).json()
-
-        if check.get('success') == 1:
-            download_url = check.get('download_url')
-            if download_url:
-                return download_url
-        if check.get('success') == -1:
-            raise Exception("فشل التحميل من loader")
-
-    raise Exception("انتهى الوقت")
 
 @bot.message_handler(commands=['start'])
 def welcome(message):
@@ -141,24 +162,27 @@ def handle_download(call):
             bot.delete_message(call.message.chat.id, call.message.message_id)
             return
 
-        # ==================== يوتيوب / فيسبوك / انستغرام ====================
-        bot.edit_message_text("⏳ جاري التجهيز (ممكن يأخد دقيقة)...", call.message.chat.id, call.message.message_id)
+        # ==================== يوتيوب ====================
+        bot.edit_message_text("⬇️ جاري التحميل...", call.message.chat.id, call.message.message_id)
 
         audio_only = q_code == "aud"
-        link = get_loader(url, audio_only)
+        link, title = get_youtube_link(url, audio_only)
 
         bot.edit_message_text("📤 جاري الرفع...", call.message.chat.id, call.message.message_id)
 
         if audio_only:
-            bot.send_audio(call.message.chat.id, link, caption="🎵 الصوت")
+            bot.send_audio(call.message.chat.id, link, caption=f"🎵 {title}")
         else:
-            bot.send_video(call.message.chat.id, link, caption="🎬 الفيديو", supports_streaming=True)
+            bot.send_video(call.message.chat.id, link, caption=f"🎬 {title}", supports_streaming=True)
 
         bot.delete_message(call.message.chat.id, call.message.message_id)
 
     except Exception as e:
         try:
-            bot.edit_message_text("❌ فشل التحميل، جرب رابط تاني.", call.message.chat.id, call.message.message_id)
+            bot.edit_message_text(
+                "❌ فشل التحميل، جرب رابط تاني.",
+                call.message.chat.id, call.message.message_id
+            )
         except:
             pass
 
