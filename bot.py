@@ -80,6 +80,8 @@ def download_with_ytdlp(url, q_code):
         'quiet': True,
         'no_warnings': True,
         'merge_output_format': 'mp4',
+        'extractor_args': {'youtube': {'player_client': ['android']}},
+        'http_headers': {'User-Agent': 'com.google.android.youtube/17.36.4 (Linux; U; Android 12) gzip'},
     }
     if q_code == "aud":
         ydl_opts['postprocessors'] = [{
